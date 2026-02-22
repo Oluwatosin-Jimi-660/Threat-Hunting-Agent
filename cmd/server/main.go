@@ -35,6 +35,10 @@ func main() {
 	store := &ingestStore{batches: map[string]struct{}{}}
 
 	http.HandleFunc("/ingest/v1", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if len(auth) < 8 || auth[:7] != "Bearer " {
 			http.Error(w, `{"error":"missing bearer"}`, http.StatusUnauthorized)
@@ -53,8 +57,8 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if env.SchemaVersion != "1.0" || len(env.Events) == 0 || len(env.Events) > 100 {
-			http.Error(w, `{"error":"invalid schema envelope"}`, http.StatusBadRequest)
+		if err := server.ValidateTelemetryEnvelope(env); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		store.mu.Lock()
@@ -101,7 +105,9 @@ func main() {
 				return
 			}
 			var rule server.HuntRule
-			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			dec := json.NewDecoder(r.Body)
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&rule); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -117,6 +123,10 @@ func main() {
 	})
 
 	http.HandleFunc("/api/rules/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if len(auth) < 8 || auth[:7] != "Bearer " {
 			http.Error(w, `{"error":"missing bearer"}`, http.StatusUnauthorized)
