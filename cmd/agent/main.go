@@ -18,7 +18,7 @@ func main() {
 	host, _ := os.Hostname()
 	h := sha256.Sum256([]byte(host))
 	cfg := agent.Config{
-		ServerURL:    env("THREAT_SERVER_URL", "https://localhost:8443/ingest/v1"),
+		ServerURL:    env("THREAT_SERVER_URL", "http://localhost:8443/ingest/v1"),
 		APIKey:       env("THREAT_API_KEY", "dev-key"),
 		AgentID:      env("THREAT_AGENT_ID", util.NewID()),
 		EndpointID:   hex.EncodeToString(h[:]),

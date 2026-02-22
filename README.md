@@ -28,7 +28,7 @@ go run ./cmd/server
 In another shell:
 
 ```bash
-THREAT_SERVER_URL=http://localhost:8443/ingest/v1 THREAT_API_KEY=dev-key go run ./cmd/agent
+go run ./cmd/agent
 ```
 
 ## Security posture highlights
