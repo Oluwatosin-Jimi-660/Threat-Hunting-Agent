@@ -6,21 +6,24 @@ Production-oriented reference implementation of the **Threat Hunting AI Agent** 
 
 - Windows-oriented endpoint agent (`cmd/agent`) with:
   - Event ingestion (PowerShell-based `Get-WinEvent` query on Windows, synthetic feed fallback off-Windows)
-  - Whitelist-driven local heuristics/risk scoring
+  - High-value event ID filtering and structured normalization only (no local detection logic)
   - Bounded queue + periodic batched HTTPS transmission
-  - TLS 1.2+ enforcement and bearer token auth header
+  - TLS 1.2+ enforcement, optional mTLS cert support, and bearer token auth header
+  - Tamper signal emission for monitored configuration changes
 - Central intelligence server (`cmd/server`) with:
   - Authenticated ingest API (`/ingest/v1`)
   - Dynamic declarative hunting rules loaded from `config/hunt-rules.json`
   - Rule validation + reload endpoint (`/api/rules/reload`)
+  - Rule versions, rollback, and enable/disable APIs
   - Active hunt transparency API (`/api/rules`)
   - Rule match findings store and query APIs (`/api/findings`, `/api/findings/risk-distribution`)
   - Strict unknown-field rejection (`DisallowUnknownFields`) and envelope validation
   - Batch deduplication by `batch_id`
-  - Bayesian posterior updates from event-pattern likelihoods
+  - Bayesian posterior updates + risk decay + explainability trail endpoint (`/api/risk/{endpoint}`)
   - 15-minute behavioral chain correlation
   - MITRE ATT&CK mapping output
   - Basic analyst dashboard endpoint (`/dashboard`) and chains API (`/api/chains`)
+  - Architecture details in `docs/option-b-centralized-detection-architecture.md`
 - Telemetry schema (`schema/telemetry.v1.json`)
 
 ## Run

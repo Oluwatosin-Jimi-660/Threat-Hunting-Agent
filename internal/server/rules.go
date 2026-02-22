@@ -43,10 +43,19 @@ type RuleSet struct {
 	Rules   []HuntRule `json:"rules"`
 }
 
+type SignedRulePackage struct {
+	PackageVersion string  `json:"package_version"`
+	SignedAt       string  `json:"signed_at"`
+	Signer         string  `json:"signer"`
+	Payload        RuleSet `json:"payload"`
+	Signature      string  `json:"signature"`
+}
+
 type RuleManager struct {
 	mu        sync.RWMutex
 	rules     []HuntRule
 	rulesByID map[string]HuntRule
+	versions  []RuleSet
 	ruleFile  string
 	auditLog  string
 }
@@ -73,6 +82,7 @@ func (r *RuleManager) Load() error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.versions = append(r.versions, RuleSet{Version: rs.Version, Rules: append([]HuntRule{}, rs.Rules...)})
 	r.rules = append([]HuntRule{}, rs.Rules...)
 	r.rulesByID = map[string]HuntRule{}
 	for _, rule := range rs.Rules {
@@ -85,6 +95,53 @@ func (r *RuleManager) Rules() []HuntRule {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return append([]HuntRule{}, r.rules...)
+}
+
+func (r *RuleManager) Versions() []RuleSet {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]RuleSet, len(r.versions))
+	copy(out, r.versions)
+	return out
+}
+
+func (r *RuleManager) Rollback(version string, actor string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rs := range r.versions {
+		if rs.Version != version {
+			continue
+		}
+		r.rules = append([]HuntRule{}, rs.Rules...)
+		r.rulesByID = map[string]HuntRule{}
+		for _, rule := range rs.Rules {
+			r.rulesByID[rule.RuleID] = rule
+		}
+		if err := r.persistLocked(); err != nil {
+			return err
+		}
+		return r.appendAudit("rollback", actor, version)
+	}
+	return fmt.Errorf("unknown ruleset version %s", version)
+}
+
+func (r *RuleManager) SetEnabled(ruleID string, enabled bool, actor string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, rule := range r.rules {
+		if rule.RuleID != ruleID {
+			continue
+		}
+		rule.Enabled = enabled
+		rule.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		r.rules[i] = rule
+		r.rulesByID[ruleID] = rule
+		if err := r.persistLocked(); err != nil {
+			return err
+		}
+		return r.appendAudit("toggle_rule", actor, ruleID)
+	}
+	return fmt.Errorf("rule not found: %s", ruleID)
 }
 
 func (r *RuleManager) UpsertRule(rule HuntRule, actor string) error {
