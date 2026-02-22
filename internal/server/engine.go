@@ -32,6 +32,22 @@ type Engine struct {
 	chains             []schema.CorrelatedChain
 }
 
+type DashboardOverview struct {
+	TotalEndpoints     int                    `json:"total_endpoints"`
+	TotalEvents        int                    `json:"total_events"`
+	TotalChains        int                    `json:"total_chains"`
+	HighRiskEndpoints  int                    `json:"high_risk_endpoints"`
+	AttackTechniqueMap map[string]int         `json:"attack_technique_map"`
+	EndpointScores     []EndpointRiskSnapshot `json:"endpoint_scores"`
+}
+
+type EndpointRiskSnapshot struct {
+	EndpointID string  `json:"endpoint_id"`
+	Score      int     `json:"score"`
+	Posterior  float64 `json:"posterior"`
+	Events     int     `json:"events"`
+}
+
 type endpointProgress struct {
 	LastProcessedIndex int
 	LastProcessedAt    string
@@ -201,4 +217,46 @@ func (e *Engine) EndpointScore(endpoint string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return int(math.Round(e.posterior[endpoint] * 100))
+}
+
+func (e *Engine) Overview() DashboardOverview {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	overview := DashboardOverview{
+		TotalEndpoints:     len(e.eventsByEndpoint),
+		TotalChains:        len(e.chains),
+		AttackTechniqueMap: map[string]int{},
+		EndpointScores:     make([]EndpointRiskSnapshot, 0, len(e.eventsByEndpoint)),
+	}
+
+	for endpoint, events := range e.eventsByEndpoint {
+		overview.TotalEvents += len(events)
+		posterior := e.posterior[endpoint]
+		score := int(math.Round(posterior * 100))
+		if score >= 70 {
+			overview.HighRiskEndpoints++
+		}
+		overview.EndpointScores = append(overview.EndpointScores, EndpointRiskSnapshot{
+			EndpointID: endpoint,
+			Score:      score,
+			Posterior:  posterior,
+			Events:     len(events),
+		})
+	}
+
+	for _, chain := range e.chains {
+		for _, attack := range chain.ATTACKTechniques {
+			overview.AttackTechniqueMap[attack.TechniqueID+" "+attack.TechniqueName]++
+		}
+	}
+
+	sort.Slice(overview.EndpointScores, func(i, j int) bool {
+		if overview.EndpointScores[i].Score == overview.EndpointScores[j].Score {
+			return overview.EndpointScores[i].EndpointID < overview.EndpointScores[j].EndpointID
+		}
+		return overview.EndpointScores[i].Score > overview.EndpointScores[j].Score
+	})
+
+	return overview
 }
