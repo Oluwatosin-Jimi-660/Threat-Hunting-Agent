@@ -24,14 +24,26 @@ var likelihoods = map[string]likelihood{
 }
 
 type Engine struct {
-	mu               sync.Mutex
-	eventsByEndpoint map[string][]schema.Event
-	posterior        map[string]float64
-	chains           []schema.CorrelatedChain
+	mu                 sync.Mutex
+	eventsByEndpoint   map[string][]schema.Event
+	posterior          map[string]float64
+	progressByEndpoint map[string]endpointProgress
+	chainsByEndpoint   map[string][]schema.CorrelatedChain
+	chains             []schema.CorrelatedChain
+}
+
+type endpointProgress struct {
+	LastProcessedIndex int
+	LastProcessedAt    string
 }
 
 func NewEngine() *Engine {
-	return &Engine{eventsByEndpoint: map[string][]schema.Event{}, posterior: map[string]float64{}}
+	return &Engine{
+		eventsByEndpoint:   map[string][]schema.Event{},
+		posterior:          map[string]float64{},
+		progressByEndpoint: map[string]endpointProgress{},
+		chainsByEndpoint:   map[string][]schema.CorrelatedChain{},
+	}
 }
 
 func (e *Engine) Ingest(env schema.TelemetryEnvelope) {
@@ -79,30 +91,48 @@ func (e *Engine) buildChains(endpoint string) {
 		return
 	}
 	sort.Slice(events, func(i, j int) bool { return events[i].RecordedAt < events[j].RecordedAt })
+	e.eventsByEndpoint[endpoint] = events
+
+	progress := e.progressByEndpoint[endpoint]
+	if progress.LastProcessedIndex >= len(events) {
+		return
+	}
+
+	startIdx := progress.LastProcessedIndex
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if startIdx > len(events) {
+		startIdx = len(events)
+	}
+
 	window := 15 * time.Minute
-	var chain []schema.Event
-	var start time.Time
-	for _, evt := range events {
+	chains := append([]schema.CorrelatedChain{}, e.chainsByEndpoint[endpoint]...)
+	for _, evt := range events[startIdx:] {
 		t, _ := time.Parse(time.RFC3339Nano, evt.RecordedAt)
-		if len(chain) == 0 {
-			chain = []schema.Event{evt}
-			start = t
+		if len(chains) == 0 {
+			chains = append(chains, e.correlatedChain(endpoint, []schema.Event{evt}))
 			continue
 		}
-		if t.Sub(start) <= window {
-			chain = append(chain, evt)
+
+		lastChain := chains[len(chains)-1]
+		if t.Sub(lastChain.Start) <= window {
+			updatedEvents := append(append([]schema.Event{}, lastChain.Events...), evt)
+			chains[len(chains)-1] = e.correlatedChain(endpoint, updatedEvents)
 		} else {
-			e.emitChain(endpoint, chain)
-			chain = []schema.Event{evt}
-			start = t
+			chains = append(chains, e.correlatedChain(endpoint, []schema.Event{evt}))
 		}
 	}
-	if len(chain) > 0 {
-		e.emitChain(endpoint, chain)
+
+	e.chainsByEndpoint[endpoint] = chains
+	e.progressByEndpoint[endpoint] = endpointProgress{
+		LastProcessedIndex: len(events),
+		LastProcessedAt:    events[len(events)-1].RecordedAt,
 	}
+	e.refreshGlobalChains()
 }
 
-func (e *Engine) emitChain(endpoint string, events []schema.Event) {
+func (e *Engine) correlatedChain(endpoint string, events []schema.Event) schema.CorrelatedChain {
 	score := 0
 	for _, ev := range events {
 		score += ev.LocalScore
@@ -113,7 +143,21 @@ func (e *Engine) emitChain(endpoint string, events []schema.Event) {
 	maps := mapATTACK(events)
 	start, _ := time.Parse(time.RFC3339Nano, events[0].RecordedAt)
 	end, _ := time.Parse(time.RFC3339Nano, events[len(events)-1].RecordedAt)
-	e.chains = append(e.chains, schema.CorrelatedChain{EndpointID: endpoint, Start: start, End: end, CompositeScore: score, Posterior: e.posterior[endpoint], Pattern: chainPattern(events), ATTACKTechniques: maps, Events: events})
+	return schema.CorrelatedChain{EndpointID: endpoint, Start: start, End: end, CompositeScore: score, Posterior: e.posterior[endpoint], Pattern: chainPattern(events), ATTACKTechniques: maps, Events: events}
+}
+
+func (e *Engine) refreshGlobalChains() {
+	allChains := make([]schema.CorrelatedChain, 0)
+	for _, endpointChains := range e.chainsByEndpoint {
+		allChains = append(allChains, endpointChains...)
+	}
+	sort.Slice(allChains, func(i, j int) bool {
+		if allChains[i].Start.Equal(allChains[j].Start) {
+			return allChains[i].End.Before(allChains[j].End)
+		}
+		return allChains[i].Start.Before(allChains[j].Start)
+	})
+	e.chains = allChains
 	if len(e.chains) > 5000 {
 		e.chains = e.chains[len(e.chains)-5000:]
 	}
