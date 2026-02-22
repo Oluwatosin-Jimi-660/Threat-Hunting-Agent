@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -14,14 +16,18 @@ import (
 )
 
 type Config struct {
-	ServerURL    string
-	APIKey       string
-	AgentID      string
-	EndpointID   string
-	AgentVersion string
-	BatchSize    int
-	FlushEvery   time.Duration
-	MaxQueueSize int
+	ServerURL      string
+	APIKey         string
+	AgentID        string
+	EndpointID     string
+	AgentVersion   string
+	BatchSize      int
+	FlushEvery     time.Duration
+	MaxQueueSize   int
+	ClientCertFile string
+	ClientKeyFile  string
+	ServerCAFile   string
+	UpdateURL      string
 }
 
 type Transmitter struct {
@@ -33,7 +39,20 @@ type Transmitter struct {
 }
 
 func NewTransmitter(cfg Config) *Transmitter {
-	tr := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.ServerCAFile != "" {
+		pool := x509.NewCertPool()
+		if b, err := os.ReadFile(cfg.ServerCAFile); err == nil {
+			pool.AppendCertsFromPEM(b)
+			tlsCfg.RootCAs = pool
+		}
+	}
+	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
+		if cert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile); err == nil {
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+	}
+	tr := &http.Transport{TLSClientConfig: tlsCfg}
 	return &Transmitter{cfg: cfg, client: &http.Client{Timeout: 30 * time.Second, Transport: tr}}
 }
 

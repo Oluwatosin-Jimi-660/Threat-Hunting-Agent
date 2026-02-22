@@ -18,14 +18,18 @@ func main() {
 	host, _ := os.Hostname()
 	h := sha256.Sum256([]byte(host))
 	cfg := agent.Config{
-		ServerURL:    env("THREAT_SERVER_URL", "http://localhost:8443/ingest/v1"),
-		APIKey:       env("THREAT_API_KEY", "dev-key"),
-		AgentID:      env("THREAT_AGENT_ID", util.NewID()),
-		EndpointID:   hex.EncodeToString(h[:]),
-		AgentVersion: "1.0.0",
-		BatchSize:    100,
-		FlushEvery:   15 * time.Second,
-		MaxQueueSize: 10000,
+		ServerURL:      env("THREAT_SERVER_URL", "http://localhost:8443/ingest/v1"),
+		APIKey:         env("THREAT_API_KEY", "dev-key"),
+		AgentID:        env("THREAT_AGENT_ID", util.NewID()),
+		EndpointID:     hex.EncodeToString(h[:]),
+		AgentVersion:   "1.0.0",
+		BatchSize:      100,
+		FlushEvery:     15 * time.Second,
+		MaxQueueSize:   10000,
+		ClientCertFile: env("THREAT_CLIENT_CERT_FILE", ""),
+		ClientKeyFile:  env("THREAT_CLIENT_KEY_FILE", ""),
+		ServerCAFile:   env("THREAT_SERVER_CA_FILE", ""),
+		UpdateURL:      env("THREAT_UPDATE_URL", ""),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -40,6 +44,7 @@ func main() {
 			log.Printf("reader stopped: %v", err)
 		}
 	}()
+	go agent.MonitorTamper(ctx, env("THREAT_AGENT_CONFIG_PATH", ""), raw)
 
 	for {
 		select {
@@ -47,10 +52,7 @@ func main() {
 			log.Println("agent stopped")
 			return
 		case evt := <-raw:
-			sc := agent.ScoreEvent(evt)
-			if sc != nil {
-				tx.Enqueue(sc.Event)
-			}
+			tx.Enqueue(evt)
 		}
 	}
 }

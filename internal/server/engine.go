@@ -30,6 +30,8 @@ type Engine struct {
 	progressByEndpoint map[string]endpointProgress
 	chainsByEndpoint   map[string][]schema.CorrelatedChain
 	chains             []schema.CorrelatedChain
+	correlationWindow  time.Duration
+	maxEventsPerHost   int
 }
 
 type DashboardOverview struct {
@@ -59,6 +61,16 @@ func NewEngine() *Engine {
 		posterior:          map[string]float64{},
 		progressByEndpoint: map[string]endpointProgress{},
 		chainsByEndpoint:   map[string][]schema.CorrelatedChain{},
+		correlationWindow:  15 * time.Minute,
+		maxEventsPerHost:   2000,
+	}
+}
+
+func (e *Engine) SetCorrelationWindow(window time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if window >= 5*time.Minute && window <= 60*time.Minute {
+		e.correlationWindow = window
 	}
 }
 
@@ -71,6 +83,9 @@ func (e *Engine) Ingest(env schema.TelemetryEnvelope) {
 	}
 	for _, evt := range env.Events {
 		e.eventsByEndpoint[env.Envelope.EndpointID] = append(e.eventsByEndpoint[env.Envelope.EndpointID], evt)
+		if len(e.eventsByEndpoint[env.Envelope.EndpointID]) > e.maxEventsPerHost {
+			e.eventsByEndpoint[env.Envelope.EndpointID] = e.eventsByEndpoint[env.Envelope.EndpointID][len(e.eventsByEndpoint[env.Envelope.EndpointID])-e.maxEventsPerHost:]
+		}
 		for _, pat := range patterns(evt) {
 			lh := likelihoods[pat]
 			p = (lh.PC * p) / ((lh.PC * p) + (lh.PnC * (1 - p)))
@@ -122,7 +137,7 @@ func (e *Engine) buildChains(endpoint string) {
 		startIdx = len(events)
 	}
 
-	window := 15 * time.Minute
+	window := e.correlationWindow
 	chains := append([]schema.CorrelatedChain{}, e.chainsByEndpoint[endpoint]...)
 	for _, evt := range events[startIdx:] {
 		t, _ := time.Parse(time.RFC3339Nano, evt.RecordedAt)

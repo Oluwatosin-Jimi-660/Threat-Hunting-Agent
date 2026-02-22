@@ -46,13 +46,21 @@ func (r *Reader) streamSynthetic(ctx context.Context, out chan<- schema.Event) e
 		case <-ctx.Done():
 			return nil
 		case t := <-ticker.C:
-			out <- schema.Event{EventID: util.NewID(), WindowsEventID: 4688, LogChannel: "Security", RecordedAt: t.UTC().Format(time.RFC3339Nano), Data: map[string]string{"process_name": "powershell.exe", "command_line": "powershell -enc SQBtAG...", "parent_process": "winword.exe"}}
+			out <- schema.Event{EventID: util.NewID(), WindowsEventID: 4688, LogChannel: "Security", RecordedAt: t.UTC().Format(time.RFC3339Nano), Data: map[string]string{"process_name": "powershell.exe", "command_line": "powershell -enc SQBtAG...", "parent_process": "winword.exe", "source": "synthetic"}}
 		}
 	}
 }
 
 func fetchWindowsEvents() ([]schema.Event, error) {
-	query := "Get-WinEvent -FilterHashtable @{LogName='Security';ID=4688,4624,4625,4648,4698,4699,4657,1102,4660,4663} -MaxEvents 20 | Select-Object Id,TimeCreated,LogName,Message,@{Name='Xml';Expression={$_.ToXml()}} | ConvertTo-Json -Depth 6"
+	query := "$filters = @(" +
+		"@{LogName='Security';ID=4624,4625,4648,4688,4698,4699,4657,4663,1102}," +
+		"@{LogName='System';ID=7040,7045}," +
+		"@{LogName='Microsoft-Windows-PowerShell/Operational';ID=4103,4104}," +
+		"@{LogName='Microsoft-Windows-TaskScheduler/Operational';ID=106,140,141}," +
+		"@{LogName='Microsoft-Windows-Windows Defender/Operational';ID=5001,5004,5010}" +
+		"); " +
+		"$events = foreach ($f in $filters) { Get-WinEvent -FilterHashtable $f -MaxEvents 10 -ErrorAction SilentlyContinue }; " +
+		"$events | Sort-Object TimeCreated -Descending | Select-Object -First 50 Id,TimeCreated,LogName,Message,@{Name='Xml';Expression={$_.ToXml()}} | ConvertTo-Json -Depth 6"
 	b, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", query).Output()
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)

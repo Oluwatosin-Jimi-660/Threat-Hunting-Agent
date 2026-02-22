@@ -29,7 +29,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("unable to load rules: %v", err)
 	}
-	findings := server.NewFindingsStore()
+	retentionDays := 90
+	findings := server.NewFindingsStore(time.Duration(retentionDays) * 24 * time.Hour)
+	riskModel := server.NewRiskModel(0.01, 6*time.Hour)
 	keys := map[string]struct{}{requiredSecret("THREAT_API_KEY"): {}}
 	adminKeys := map[string]struct{}{requiredSecret("THREAT_ADMIN_KEY"): {}}
 	store := &ingestStore{batches: map[string]struct{}{}}
@@ -73,15 +75,20 @@ func main() {
 		for _, evt := range env.Events {
 			matches := server.EvaluateRules(evt, ruleManager.Rules())
 			for _, match := range matches {
+				posterior := riskModel.Apply(env.Envelope.EndpointID, server.RiskUpdate{RuleID: match.Rule.RuleID, LikelihoodC: 0.75, LikelihoodN: 0.15, Reason: strings.Join(match.Reasons, "; ")}, time.Now().UTC())
 				findings.Add(server.Finding{
 					Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 					EndpointID:   env.Envelope.EndpointID,
 					RuleID:       match.Rule.RuleID,
 					MatchedEvent: evt,
-					RiskScore:    match.Rule.RiskWeight,
+					RiskScore:    int(posterior * 100),
 					Explanation:  "Matched because: " + strings.Join(match.Reasons, "; "),
 					MITRE:        match.Rule.MITRETechnique,
 				})
+			}
+			if evt.WindowsEventID == 900001 {
+				posterior := riskModel.Apply(env.Envelope.EndpointID, server.RiskUpdate{RuleID: "tamper_event", LikelihoodC: 0.9, LikelihoodN: 0.05, Reason: "tamper detection"}, time.Now().UTC())
+				findings.Add(server.Finding{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), EndpointID: env.Envelope.EndpointID, RuleID: "tamper_event", MatchedEvent: evt, RiskScore: int(posterior * 100), Explanation: "Endpoint tamper event detected"})
 			}
 		}
 		eng.Ingest(env)
@@ -142,6 +149,35 @@ func main() {
 		}
 		_, _ = w.Write([]byte(`{"status":"reloaded"}`))
 	})
+	http.HandleFunc("/api/rules/versions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"versions": ruleManager.Versions()})
+	})
+	http.HandleFunc("/api/rules/rollback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		v := r.URL.Query().Get("version")
+		if err := ruleManager.Rollback(v, "api_admin"); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"rolled_back"}`))
+	})
+	http.HandleFunc("/api/rules/toggle", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		ruleID := r.URL.Query().Get("rule_id")
+		enabled := r.URL.Query().Get("enabled") == "true"
+		if err := ruleManager.SetEnabled(ruleID, enabled, "api_admin"); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"updated"}`))
+	})
 
 	http.HandleFunc("/api/findings", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -161,6 +197,17 @@ func main() {
 	http.HandleFunc("/api/chains", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(eng.Chains())
+	})
+	http.HandleFunc("/api/risk/", func(w http.ResponseWriter, r *http.Request) {
+		endpointID := strings.TrimPrefix(r.URL.Path, "/api/risk/")
+		posterior, trail := riskModel.Score(endpointID, time.Now().UTC())
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"endpoint_id": endpointID, "risk_score": int(posterior * 100), "posterior": posterior, "explainability": trail})
+	})
+	http.HandleFunc("/api/tamper-events", func(w http.ResponseWriter, r *http.Request) {
+		endpointID := r.URL.Query().Get("endpoint_id")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"tamper_events": findings.TamperEvents(endpointID)})
 	})
 	http.HandleFunc("/api/overview", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

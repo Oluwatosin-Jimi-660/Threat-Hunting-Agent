@@ -6,7 +6,7 @@ import (
 )
 
 func TestFindingsQueryAndRiskDistribution(t *testing.T) {
-	store := NewFindingsStore()
+	store := NewFindingsStore(90 * 24 * time.Hour)
 	now := time.Now().UTC()
 	store.Add(
 		Finding{Timestamp: now.Add(-2 * time.Minute).Format(time.RFC3339Nano), EndpointID: "e1", RuleID: "r1", RiskScore: 20},
