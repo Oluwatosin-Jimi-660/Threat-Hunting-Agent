@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"threat-hunting-agent/internal/schema"
 	"threat-hunting-agent/internal/server"
@@ -19,7 +25,13 @@ type ingestStore struct {
 
 func main() {
 	eng := server.NewEngine()
-	keys := map[string]struct{}{env("THREAT_API_KEY", "dev-key"): {}}
+	ruleManager, err := server.NewRuleManager(env("THREAT_RULE_FILE", "config/hunt-rules.json"), env("THREAT_RULE_AUDIT_LOG", "logs/rule_audit.log"))
+	if err != nil {
+		log.Fatalf("unable to load rules: %v", err)
+	}
+	findings := server.NewFindingsStore()
+	keys := map[string]struct{}{requiredSecret("THREAT_API_KEY"): {}}
+	adminKeys := map[string]struct{}{requiredSecret("THREAT_ADMIN_KEY"): {}}
 	store := &ingestStore{batches: map[string]struct{}{}}
 
 	http.HandleFunc("/ingest/v1", func(w http.ResponseWriter, r *http.Request) {
@@ -54,9 +66,86 @@ func main() {
 		}
 		store.batches[env.Envelope.BatchID] = struct{}{}
 		store.mu.Unlock()
+		for _, evt := range env.Events {
+			matches := server.EvaluateRules(evt, ruleManager.Rules())
+			for _, match := range matches {
+				findings.Add(server.Finding{
+					Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
+					EndpointID:   env.Envelope.EndpointID,
+					RuleID:       match.Rule.RuleID,
+					MatchedEvent: evt,
+					RiskScore:    match.Rule.RiskWeight,
+					Explanation:  "Matched because: " + strings.Join(match.Reasons, "; "),
+					MITRE:        match.Rule.MITRETechnique,
+				})
+			}
+		}
 		eng.Ingest(env)
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+	})
+
+	http.HandleFunc("/api/rules", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"rules": ruleManager.Rules()})
+		case http.MethodPost, http.MethodPut:
+			auth := r.Header.Get("Authorization")
+			if len(auth) < 8 || auth[:7] != "Bearer " {
+				http.Error(w, `{"error":"missing bearer"}`, http.StatusUnauthorized)
+				return
+			}
+			if _, ok := adminKeys[auth[7:]]; !ok {
+				http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+				return
+			}
+			var rule server.HuntRule
+			if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := ruleManager.UpsertRule(rule, "api_admin"); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"status":"rule_saved"}`))
+		default:
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		}
+	})
+
+	http.HandleFunc("/api/rules/reload", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if len(auth) < 8 || auth[:7] != "Bearer " {
+			http.Error(w, `{"error":"missing bearer"}`, http.StatusUnauthorized)
+			return
+		}
+		if _, ok := adminKeys[auth[7:]]; !ok {
+			http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+			return
+		}
+		if err := ruleManager.Load(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"reloaded"}`))
+	})
+
+	http.HandleFunc("/api/findings", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		endpointID := q.Get("endpoint_id")
+		ruleID := q.Get("rule_id")
+		start, _ := time.Parse(time.RFC3339, q.Get("start"))
+		end, _ := time.Parse(time.RFC3339, q.Get("end"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"findings": findings.Query(endpointID, ruleID, start, end)})
+	})
+
+	http.HandleFunc("/api/findings/risk-distribution", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(findings.RiskDistribution())
 	})
 
 	http.HandleFunc("/api/chains", func(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +164,13 @@ func main() {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(dashboardHTML))
 	})
-	_ = http.ListenAndServe(":8443", nil)
+	cert := os.Getenv("TLS_CERT_FILE")
+	key := os.Getenv("TLS_KEY_FILE")
+	if cert != "" && key != "" {
+		log.Fatal(http.ListenAndServeTLS(":8443", cert, key, nil))
+	}
+	log.Println("WARNING: TLS_CERT_FILE/TLS_KEY_FILE not set, running HTTP for local development only")
+	log.Fatal(http.ListenAndServe(":8443", nil))
 }
 
 func env(k, d string) string {
@@ -83,6 +178,17 @@ func env(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func requiredSecret(name string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	generated := hex.EncodeToString(b)
+	fmt.Printf("%s was not set; generated ephemeral secret for this process: %s\n", name, generated)
+	return generated
 }
 
 const dashboardHTML = `<!doctype html>

@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "rule_id": "WIN-PS-ENCODED-001",
+      "description": "PowerShell command line contains encoded command marker",
+      "target_event_ids": [4688, 4104],
+      "conditions": {
+        "operator": "OR",
+        "checks": [
+          {
+            "field": "command_line",
+            "operator": "contains",
+            "value": "-enc"
+          },
+          {
+            "field": "command_line",
+            "operator": "contains",
+            "value": "encodedcommand"
+          }
+        ]
+      },
+      "mitre_technique": {
+        "technique_id": "T1059.001",
+        "technique_name": "PowerShell",
+        "tactic_id": "TA0002",
+        "tactic_name": "Execution",
+        "confidence": 0.9
+      },
+      "risk_weight": 60,
+      "enabled": true
+    },
+    {
+      "rule_id": "WIN-SVC-TEMP-002",
+      "description": "Service executable path points to temp directory",
+      "target_event_ids": [7045],
+      "conditions": {
+        "operator": "AND",
+        "checks": [
+          {
+            "field": "service_path",
+            "operator": "contains",
+            "value": "\\temp\\"
+          }
+        ]
+      },
+      "mitre_technique": {
+        "technique_id": "T1543.003",
+        "technique_name": "Windows Service",
+        "tactic_id": "TA0003",
+        "tactic_name": "Persistence",
+        "confidence": 0.85
+      },
+      "risk_weight": 70,
+      "enabled": true
+    }
+  ]
+}
